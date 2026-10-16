@@ -1,0 +1,62 @@
+name: Deploy to Cloudflare
+
+# Cloudflare Workers is the only host: this one Worker serves both the public
+# API and the static site in ./public (see wrangler.jsonc), so a single
+# `wrangler deploy` publishes everything.
+#
+# One repository secret arms automatic deploys
+# (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   - token with the "Edit Cloudflare Workers" permissions
+# The account id is not secret and lives in wrangler.jsonc ("account_id").
+#
+# Until the secret exists the run stays green: the smoke tests still run and the
+# preflight reports the missing secret instead of failing the build, with the
+# publish step skipped. Add it and the next push deploys; until then
+# `bun run deploy` is the manual path.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run smoke tests
+        run: npm test
+
+  deploy:
+    name: Deploy Worker
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Cloudflare secrets
+        id: preflight
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::notice::Deploy skipped — missing repository secret(s):$missing. Add them under Settings → Secrets and variables → Actions and the next push deploys automatically; until then run 'bun run deploy'."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish Worker + static assets
+        if: steps.preflight.outputs.ready == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy
